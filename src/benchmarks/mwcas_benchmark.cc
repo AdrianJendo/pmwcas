@@ -169,10 +169,10 @@ struct MwCas : public Benchmark {
         epochs = 0;
       }
 
-      // Pick a random word each time
-      for(uint32_t i = 0; i < FLAGS_word_count; ++i) {
+      // Pick a random word each time (split on FLAGS_word_count boundaries)
       retry:
-        uint64_t idx = rng.Generate(FLAGS_array_size);
+      uint64_t idx = rng.Generate(FLAGS_array_size) / FLAGS_word_count * FLAGS_word_count;
+      for(uint32_t i = 0; i < FLAGS_word_count; ++i) {
         for(uint32_t j = 0; j < i; ++j) {
           if(address[j] == reinterpret_cast<CasPtr*>(&test_array_[idx])) {
             goto retry;
@@ -182,6 +182,7 @@ struct MwCas : public Benchmark {
         value[i] = test_array_[idx].GetValueProtected();
         CHECK(value[i] % (4 * FLAGS_array_size) >= 0 &&
             (value[i] % (4 * FLAGS_array_size)) / 4 < FLAGS_array_size);
+        idx++;
       }
 
       Descriptor* descriptor = descriptor_pool_->AllocateDescriptor();
