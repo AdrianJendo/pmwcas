@@ -9,7 +9,37 @@
 #include "mwcas/mwcas.h"
 #include "util/atomics.h"
 
+#define CACHE_LINE_SIZE 64 // bytes
+
 namespace pmwcas {
+
+// Credits: DCAS code borrowed from https://stackoverflow.com/questions/4825400/cmpxchg16b-correct
+struct uint128_t
+{
+  uint64_t lo; // 1 word 64 bits
+  uint64_t hi;
+} __attribute__ (( __aligned__( CACHE_LINE_SIZE ) ));
+
+uint128_t *pmem_base;
+
+// dcas operation
+inline bool dcas( volatile uint128_t * src, uint128_t cmp, uint128_t with )
+{
+    bool result;
+    __asm__ __volatile__
+    (
+        "lock cmpxchg16b %1\n\t"
+        "setz %0"       // on gcc6 and later, use a flag output constraint instead
+        : "=q" ( result )
+        , "+m" ( *src )
+        , "+d" ( cmp.hi )
+        , "+a" ( cmp.lo )
+        : "c" ( with.hi )
+        , "b" ( with.lo )
+        : "cc", "memory" // compile-time memory barrier.  Omit if you want memory_order_relaxed compile-time ordering.
+    );
+    return result;
+}
 
 bool MwCASMetrics::enabled = false;
 CoreLocal<MwCASMetrics*> MwCASMetrics::instance;
@@ -661,8 +691,9 @@ bool Descriptor::PersistentMwCAS(uint32_t calldepth) {
 
   std::sort(words_, words_ + count_, [this](WordDescriptor &a, WordDescriptor &b)->bool{
     return a.address_ < b.address_;
-  });
+  }); // sort words by address
 
+  // installing descriptors (phase 1)
   for(uint32_t i = 0; i < count_ && my_status == kStatusSucceeded; ++i) {
     WordDescriptor* wd = &words_[i];
     if((uint64_t)wd->address_ == Descriptor::kAllocNullAddress){
@@ -704,7 +735,7 @@ retry_entry:
 #endif
 
   // Persist all target fields if we successfully installed mwcas descriptor on
-  // all fields.
+  // all fields. (phase 2)
   if(my_status == kStatusSucceeded) {
     for (uint32_t i = 0; i < count_; ++i) {
       WordDescriptor* wd = &words_[i];
@@ -719,6 +750,7 @@ retry_entry:
     }
   }
 
+  // finalize mwcas status
   // Switch to the final state, the MwCAS concludes after this point
   CompareExchange32(&status_, my_status | kStatusDirtyFlag, kStatusUndecided);
 
@@ -730,6 +762,7 @@ retry_entry:
   status_ &= ~kStatusDirtyFlag;
   // No need to flush again, recovery does not care about the dirty bit
 
+  // install final values (phase 3)
   bool succeeded = (status_ == kStatusSucceeded);
   for(uint32_t i = 0; i < count_; i++) {
     WordDescriptor* wd = &words_[i];
